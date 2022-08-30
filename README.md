@@ -2,7 +2,7 @@
 
 a 6502 toolchain... assembler , emulator , debugger.
 
-##the only emulated hardware I/O is:
+## the only emulated hardware I/O is:
 * $FE (read a random number)
 * $FE (write to sync to next frame of N ms)
 * $FF (read to get latest pressed ascii code)
