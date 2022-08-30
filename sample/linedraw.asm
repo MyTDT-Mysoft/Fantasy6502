@@ -1,0 +1,645 @@
+; Solution for SPO600 Winter 2020 Lab 3 Option 5 - two-cursor line drawing program
+; Chris Tyler 2020. (C)2020 Seneca College. Licensed under GPLv2+
+; Notes on operation are at the bottom of the source.
+
+; constants
+define  A_ROW_S         $08     ; starting position for A_ROW
+define  A_COL_S         $08     ; starting position for A_COL
+define  B_ROW_S         $18     ; starting position for B_ROW
+define  B_COL_S         $18     ; starting position for B_COL
+define  A_COLOUR        $0d     ; colour of cursor A
+define  B_COLOUR        $0e     ; colour of cursor B
+define  L_COLOUR        $01     ; line colour
+define  BACK_COLOUR $0f ; lines dropped on backing store colour
+
+define  A_UP            #-72     ; cursor A key controls (arrows)
+define  A_RIGHT         #-77
+define  A_DOWN          #-80
+define  A_LEFT          #-75
+
+define  B_UP            #119     ; cursor B key controls (a/w/s/z)
+define  B_RIGHT         #100
+define  B_DOWN          #115
+define  B_LEFT          #97
+
+define  KEY_DROP    #13 ; control to drop the screen line on the screen
+define  KEY_CLEAR   #32 ; control to clear the screen
+
+define  BACK_STORE_L    $00 ; low byte of backing store
+define  BACK_STORE_H    $a0 ; high byte of backing store
+
+
+; zero-page variable locations
+define  A_ROW           $00     ; cursor A ROW position
+define  A_COL           $01     ; cursor B COL position
+define  A_PTR           $02     ; pointer to cursor A in screen memory
+define  A_PTR_H         $03
+
+define  B_ROW           $04     ; Same for cursor B...
+define  B_COL           $05
+define  B_PTR           $06
+define  B_PTR_H         $07
+
+define  BACK_PTR    $08 ; Pointer to backing store
+define  BACK_PTR_H  $09
+
+define  MODE_XY         $20     ; Mode: 0: X+=1,Y+=DELTA; 1: Y+=1,X+=DELTA
+define  DELTA           $21     ; 16-bit fixed-point rise/run or run/rise delta value, radix=8
+define  DELTA_H         $22
+define  COL             $23     ; 16-bit fixed-point COL position for line draw
+define  COL_H           $24     ; ... this is the integer portion
+define  ROW             $25     ; 16-bit fixed-point ROW position for line draw
+define  ROW_H           $26     ; ... this is the integer portion
+define  PTR             $27     ; pointer to (ROW_H,COL_H) address on screen
+define  PTR_H           $28
+define  DELTA_NEG       $29     ; DELTA value is negative
+define  DELTA_X         $2a     ; abs(A_COL-B_COL)
+define  DELTA_X_NEG     $2b     ; A_COL<B_COL
+define  DELTA_Y         $2c     ; abs(A_ROW-B_ROW)
+define  DELTA_Y_NEG     $2d     ; A_ROW<B_ROW
+define  END             $2e     ; ending row or column for line
+define  STEP_NEG    $2f ; whether the 1-pixel step is positive or negative
+
+define  DIVIDEND        $30     ; 16-bit dividend
+define  DIVIDEND_H      $31
+define  DIVISOR         $32     ; 16-bit divisor
+define  DIVISOR_H       $33
+define  QUOTIENT        $34     ; 16-bit quotient
+define  QUOTIENT_H      $35
+define  TRACKER         $36     ; 16-bit shift tracker for division
+define  TRACKER_H       $37
+
+
+; IO addresses
+define  KEY             $ff     ; i/o port to get last key pressed
+
+; ROM routines
+
+;define      SCINIT      $ff81 ; initialize/clear screen
+;define      CHRIN       $ffcf ; input character from keyboard
+;define      CHROUT      $ffd2 ; output character to screen
+;define      SCREEN      $ffed ; get screen size
+;define      PLOT        $fff0 ; get/set cursor coordinates
+
+; ------------------------------------------------------------------------
+
+; initialize
+
+        ;jsr SCINIT  ; reset character screen
+        ldy #$00
+printloop:  lda helpmsg,y   ; print the help message
+        beq doneprint
+        ;jsr CHROUT
+        iny
+        bne printloop
+
+doneprint:      lda #A_ROW_S    ; set initial cursor positions
+                sta A_ROW
+                lda #A_COL_S
+                sta A_COL
+                lda #B_ROW_S
+                sta B_ROW
+                lda #B_COL_S
+                sta B_COL
+
+        lda #$01    ; inject a dummy keystroke to provoke first line draw
+        sta KEY
+
+        jsr CLEAR   ; clear the backing store
+
+; draw cursor positions
+draw:           jsr C_GOTO      ; update the cursor pointers based on coordinates
+
+                lda #A_COLOUR   ; draw cursor A
+                ldy #$00
+                sta (A_PTR),y
+
+                lda #B_COLOUR   ; draw cursor B
+                sta (B_PTR),y
+
+; get and handle keystroke
+getkey:         lda KEY     ; get a keystroke
+                beq getkey  ; if nothing there, look again
+
+                ldx #$00    ; clear keystroke 
+                stx KEY
+
+                cmp #A_UP   ; check for the A_UP key
+                bne not_a_up    ; skip to next check if no match
+                dec A_ROW   ; handle the key
+                clc
+                bcc done_keys   ; skip rest of key handlers
+
+not_a_up:       cmp #A_RIGHT    ; continue the pattern above for other keys...
+                bne not_a_right
+                inc A_COL
+                clc
+                bcc done_keys
+
+not_a_right:    cmp #A_DOWN
+                bne not_a_down
+                inc A_ROW
+                clc
+                bcc done_keys
+
+not_a_down:     cmp #A_LEFT
+                bne not_a_left
+                dec A_COL
+                clc
+                bcc done_keys
+
+not_a_left:     cmp #B_UP
+                bne not_b_up
+                dec B_ROW
+                clc
+                bcc done_keys
+
+not_b_up:       cmp #B_RIGHT
+                bne not_b_right
+                inc B_COL
+                clc
+                bcc done_keys
+
+not_b_right:    cmp #B_DOWN
+                bne not_b_down
+                inc B_ROW
+                clc
+                bcc done_keys
+
+not_b_down:     cmp #B_LEFT
+                bne not_b_left
+                dec B_COL
+
+not_b_left: cmp #KEY_CLEAR
+        bne not_key_clear
+        jsr CLEAR
+        clc
+        bcc done_keys
+
+not_key_clear:  cmp #KEY_DROP
+        bne done_keys
+
+        lda #$00        ; copy screen to backing store
+        sta PTR
+        lda #$02
+        sta PTR_H
+
+        lda #BACK_STORE_L
+        sta BACK_PTR
+        lda #BACK_STORE_H
+        sta BACK_PTR_H
+
+        ldy #$00
+
+back_loop:  lda (PTR),y
+        beq copy_to_back
+        lda #BACK_COLOUR
+copy_to_back:   sta (BACK_PTR),y
+        iny
+        bne back_loop
+        inc BACK_PTR_H
+        inc PTR_H
+        ldx PTR_H
+        cpx #$06
+        bne back_loop
+
+
+
+
+done_keys:  jsr C_CHECK ; ensure cursors are within bounds
+
+; draw the line between the cursors
+
+; --- Step 1: get absolute deltaX and deltaY
+                lda A_ROW
+                sec
+                sbc B_ROW
+                bmi row_neg
+
+                ldx #$01
+                stx DELTA_Y_NEG
+                sta DELTA_Y
+                clc
+                bcc do_delta_x
+
+row_neg:        lda B_ROW
+                sec
+                sbc A_ROW
+
+                ldx #$00
+                stx DELTA_Y_NEG
+                sta DELTA_Y
+
+do_delta_x:     lda A_COL
+                sec
+                sbc B_COL
+                bmi col_neg
+
+                ldx #$01
+                stx DELTA_X_NEG
+                sta DELTA_X
+                clc
+                bcc done_delta
+
+col_neg:        lda B_COL
+                sec
+                sbc A_COL
+
+                ldx #$00
+                stx DELTA_X_NEG
+                sta DELTA_X
+
+; --- Step 2: Clear the screen - FIXME: add compose step here when line-drop functionality added
+
+done_delta: lda #BACK_STORE_L
+        sta BACK_PTR
+        lda #BACK_STORE_H
+        sta BACK_PTR_H
+
+        lda #$02    ; clear the screen
+        sta PTR_H
+        lda #$00
+        sta PTR
+        tay
+clear:      lda (BACK_PTR),y
+        sta (PTR),y
+        iny
+        bne clear
+        inc PTR_H
+        inc BACK_PTR_H
+        ldx PTR_H
+        cpx #$06
+        bne clear
+
+
+; --- Step 3: if DELTA_X=DELTA_Y==0, there's no line to draw (skip).
+;     Else if DELTA_X>DELTA_Y, set MODE_XY, DELTA, DELTA_NEG, and STEP_NEG.
+
+        lda DELTA_X ; If delta values are both 0, no line to draw
+        ora DELTA_Y
+        bne need_line
+
+        jmp l_done
+
+need_line:  ldx #$00
+                lda DELTA_X
+                cmp DELTA_Y
+                bmi y_gt_x
+
+                inx             ; DELTA_X<=DELTA_Y, so DELTA=DELTA_X/DELTA_Y
+
+        lda DELTA_Y_NEG
+        sta DELTA_NEG
+        lda DELTA_X_NEG
+        sta STEP_NEG
+
+                lda #$00
+                sta DIVIDEND
+                lda DELTA_Y
+                sta DIVIDEND_H
+
+                lda #$00
+                sta DIVISOR
+                lda DELTA_X
+                sta DIVISOR_H
+
+                clc
+                bcc done_delta_cmp
+
+y_gt_x:         lda DELTA_X_NEG
+        sta DELTA_NEG
+        lda DELTA_Y_NEG
+        sta STEP_NEG
+
+        lda #$00
+                sta DIVIDEND
+                lda DELTA_X
+                sta DIVIDEND_H
+
+                lda #$00
+                sta DIVISOR
+                lda DELTA_Y
+                sta DIVISOR_H
+
+done_delta_cmp: jsr DIVIDE
+
+                lda QUOTIENT
+                sta DELTA
+                lda QUOTIENT_H
+                sta DELTA_H
+
+                stx MODE_XY     ; MODE_XY=0 if DELTA_X>DELTA_Y
+
+; --- Step 4: Draw the line
+
+        lda #$00
+        sta ROW
+        sta COL
+        lda A_COL
+        sta COL_H
+        lda A_ROW
+        sta ROW_H
+
+        lda MODE_XY
+        beq mode_x
+
+mode_y:     lda B_COL   ; for (COL=A_COL; COL<=B_COL; COL+=1) { ROW += DELTA ; draw pixel)
+        sta END
+
+l_loop_x:   jsr L_DRAW  ; draw pixel
+
+        lda STEP_NEG
+        bne llx_step_neg
+        inc COL_H   ; COL+=1 -- will not overflow since screen is 32 pixels wide
+        bne llx_step_done
+
+llx_step_neg:   dec COL_H   ; COL-=1
+
+llx_step_done:  lda COL_H
+        cmp END
+        beq l_done  ; done the line
+
+        ldx DELTA_NEG   ; see if we need to add or subtract DELTA
+        bne llx_delta_neg
+
+        lda ROW     ; ROW += DELTA
+        clc
+        adc DELTA
+        sta ROW
+        lda ROW_H
+        adc DELTA_H
+        sta ROW_H
+
+        clc
+        bcc l_loop_x
+
+llx_delta_neg:  lda ROW     ; ROW -= DELTA
+        sec
+        sbc DELTA
+        sta ROW
+        lda ROW_H
+        sbc DELTA_H
+        sta ROW_H
+
+        clc
+        bcc l_loop_x
+
+mode_x:     lda B_ROW   ; for (COL=A_COL; COL<=B_COL; COL+=1) { ROW += DELTA ; draw pixel)
+        sta END
+
+l_loop_y:   jsr L_DRAW  ; draw pixel
+
+        lda STEP_NEG
+        bne lly_step_neg
+
+        inc ROW_H   ; COL+=1 -- will not overflow since screen is 32 pixels wide
+        bne lly_step_done
+
+lly_step_neg:   dec ROW_H   ; COL-=1
+
+lly_step_done:  lda ROW_H
+        cmp END
+        beq l_done  ; done the line
+
+        ldx DELTA_NEG   ; see if we need to add or subtract DELTA
+        bne lly_delta_neg
+
+        lda COL     ; COL += DELTA
+        clc
+        adc DELTA
+        sta COL
+        lda COL_H
+        adc DELTA_H
+        sta COL_H
+
+        clc
+        bcc l_loop_y
+
+lly_delta_neg:  lda COL     ; COL -= DELTA
+        sec
+        sbc DELTA
+        sta COL
+        lda COL_H
+        sbc DELTA_H
+        sta COL_H
+
+        clc
+        bcc l_loop_y
+
+l_done:     jmp draw
+
+; ----- Draw one pixel of the line
+
+L_DRAW:     lda ROW_H   ; ensure ROW is in range 0:31
+        and #$1f
+        sta ROW_H
+
+        lda COL_H   ; ensure COL is in range 0:31
+        and #$1f
+        sta COL_H
+
+        ldy ROW_H   ; calculate pointer position using tables
+        lda table_low,y
+        clc
+        adc COL_H
+        sta PTR
+
+        lda table_high,y
+        adc #$00
+        sta PTR_H
+
+        lda #L_COLOUR   ; draw the pixel on the screen
+        ldy #$00
+        sta (PTR),y
+
+        rts
+
+; ----- Ensure cursor position is within bounds
+
+C_CHECK:    lda A_ROW       ; ensure ROW is in range 0:31
+                and #$1f
+                sta A_ROW
+
+                lda A_COL       ; ensure COL is in range 0:31
+                and #$1f
+                sta A_COL
+
+                lda B_ROW       ; ensure ROW is in range 0:31
+                and #$1f
+                sta B_ROW
+
+                lda B_COL       ; ensure COL is in range 0:31
+                and #$1f
+                sta B_COL
+
+        rts 
+
+; ----- Update cursor position based on coordinates
+
+C_GOTO:         ldy A_ROW       ; load pointer with start-of-row
+                lda table_low,y
+                clc
+                adc A_COL
+                sta A_PTR
+                lda table_high,y
+                adc #$00
+                sta A_PTR_H
+
+                ldy B_ROW       ; load pointer with start-of-row
+                lda table_low,y
+                clc
+                adc B_COL
+                sta B_PTR
+                lda table_high,y
+                adc #$00
+                sta B_PTR_H
+
+                rts
+
+; ----- address tables
+; these two tables contain the high and low bytes
+; of the addresses of the start of each row
+ 
+table_high:
+dcb $02,$02,$02,$02,$02,$02,$02,$02
+dcb $03,$03,$03,$03,$03,$03,$03,$03
+dcb $04,$04,$04,$04,$04,$04,$04,$04
+dcb $05,$05,$05,$05,$05,$05,$05,$05,
+ 
+table_low:
+dcb $00,$20,$40,$60,$80,$a0,$c0,$e0
+dcb $00,$20,$40,$60,$80,$a0,$c0,$e0
+dcb $00,$20,$40,$60,$80,$a0,$c0,$e0
+dcb $00,$20,$40,$60,$80,$a0,$c0,$e0
+
+
+
+; ------------------------------------------------------------------------
+; divide DIVIDEND by DIVISOR, result in QUOTIENT
+; using fixed-point 16-bit math with 8-bit radix
+; assumes that QUOTIENT<=1
+
+DIVIDE:         pha     ; save registers
+        tya
+        pha
+        txa
+        pha
+
+        lda #$00    ; initialize QUOTIENT=0, TRACKER=$100
+                sta QUOTIENT
+                sta QUOTIENT_H
+                sta TRACKER
+                lda #$01
+                sta TRACKER_H
+
+divide_sub:     lda DIVIDEND    ; subtract DIVISOR from DIVIDEND
+                sec
+                sbc DIVISOR
+                tax
+
+                lda DIVIDEND_H
+                sbc DIVISOR_H
+
+                bcc divide_ror  ; if DIVISOR > DIVIDEND, skip
+
+                stx DIVIDEND    ; update DIVIDEND
+                sta DIVIDEND_H
+
+                lda QUOTIENT    ; QUOTIENT=QUOTIENT|TRACKER
+                ora TRACKER
+                sta QUOTIENT
+
+                lda QUOTIENT_H
+                ora TRACKER_H
+                sta QUOTIENT_H
+
+divide_ror:     clc     ; rotate TRACKER right
+                ror TRACKER_H
+                ror TRACKER
+
+                lda TRACKER
+                ora TRACKER_H
+
+                beq divide_done
+
+                clc     ; rotate DIVISOR right
+                ror DIVISOR_H
+                ror DIVISOR
+
+        clc
+                bcc divide_sub  ; continue
+
+divide_done:    pla     ; restore registers
+        tax
+        pla
+        tay
+        pla
+
+        rts
+
+helpmsg:
+dcb $0d
+dcb 32,"L","I","N","E","D","R","A","W",$0d
+dcb $0d
+dcb 32,"C","u","r","s","o","r",32,"k","e","y","s"
+dcb 32,"-",32,"m","o","v","e",32,"g","r","e","e","n",32,"c","u","r","s","o","r",$0d
+dcb 32,"a","/","w","/","s","/","z",32,32,32,32
+dcb 32,"-",32,"m","o","v","e",32,"b","l","u","e",32,"c","u","r","s","o","r",$0d
+dcb 32,"d",32,32,32,32,32,32,32,32,32,32
+dcb 32,"-",32,"d","r","o","p",32,"l","i","n","e"
+dcb 32,"o","n","t","o",32,"b","a","c","k","g","r","o","u","n","d",$0d
+dcb 32,"c",32,32,32,32,32,32,32,32,32,32
+dcb 32,"-",32,"c","l","e","a","r",32,"s","c","r","e","e","n",$0d
+dcb 00
+
+; --------------------------------------------------------------
+; CLEAR - clear backing store
+
+CLEAR:      lda #BACK_STORE_H; clear the backing store
+        sta PTR_H
+        lda #BACK_STORE_L
+        sta PTR
+        lda #$00
+        ldy #$00
+
+back_clear: sta (PTR),y
+        iny
+        bne back_clear
+        inc PTR_H
+        ldx PTR_H
+        cpx #$a4
+        bne back_clear
+        rts
+
+; Notes on this code:
+
+; This program presents two cursors to the user. They can move one with the cursor
+; keys and the other with the a/w/s/z keys. A line is drawn between each of the
+; cursors. They can "drop" the line onto the background at any time with the "d"
+; key, which means that that line will persist (in gray) in the background of the
+; image. The "c" key clears the screen.
+
+; The program works by maintaining a backing-store -- an area of memory which
+; contains the background image. The backing store starts as all-black and is
+; copied to the background of the screen memory just before each time the cursors and
+; the cursor-line are drawn. The "d" key copies the screen memory to the backing-store,
+; changing all of the non-black pixels to gray. The "c" key clears the backing-
+; store to black.
+
+; In order to draw a line, the program checks to see if the distance between
+; the cursors is wider than it is tall. If so, then it calculates the rise
+; (vertical distance between cursors) divided by the run (horizontal distance
+; between the cursors). This is calculated and stored as a fixed-point value
+; (16 bit value with 8 integer bits and 8 fractional bits). For simplicity,
+; the sign is stored as a separate value. The code then sets the initial coordinates 
+; of the line-drawing routine to the position of the first cursor, and iterates 
+; horizontally one pixel at a time toward the second cursor. Each time, it offsets
+; the vertical position that it is drawing by the rise/run value, including fractional
+; pixel positions. If the distance between cursors is taller than it is wide,
+; the code calculates run/rise and iterates vertically.
+
+; Shortcomings:
+; * The code is far from optimized!
+; * Negative flags should be dropped in favor of signed byets (at least for 1-byte values).
+; * The code does not handle shifted keyboard input (e.g., "A" instead of "a").
+; * There should be a help message displayed on the character display (e.g., keys)
